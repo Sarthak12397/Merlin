@@ -85,7 +85,7 @@ If a decision cannot be replayed, it cannot be reliably audited.
 
 ---
 
-# Architecture
+# Architecture (Full Vision — see Project Status for what's actually built)
 
 ```
                  Client
@@ -194,33 +194,26 @@ Responsible for:
 * Listing assumptions
 * Providing initial confidence
 
----
-
 ## Validator Agents
 
 Each validator answers one specific question.
 
 ### Evidence Validator
-
 Does available evidence support the proposal?
 
 ### Logic Validator
-
 Is the reasoning internally consistent?
 
 ### Risk Validator
-
 What could go wrong?
 
 ### Adversarial Validator
-
 Can the proposal be proven incorrect?
 
 ### Compliance Validator
-
 Does the proposal violate policy?
 
----
+**Current MVP note:** only one general Validator is implemented so far — it folds risk/logic/missing-info checking into a single agent. The other four are named here as the target design; see Project Status.
 
 ## Judge Agent
 
@@ -243,7 +236,7 @@ Escalate
 
 ---
 
-# Decision Replay Engine
+# Decision Replay Engine (V2 — not yet built)
 
 The Decision Replay Engine is Merlin's core audit capability.
 
@@ -264,6 +257,8 @@ The replay system reconstructs:
 This follows event-sourcing principles:
 
 > If you cannot replay it, you cannot reliably audit it.
+
+The MVP already persists `input_hash`/`output_hash` on every decision — the seed of replay verification, even before the full replay engine exists.
 
 ---
 
@@ -302,15 +297,14 @@ Handled scenarios:
 
 * Validator timeout
 * Agent failure
-* LLM API failure
+* LLM API failure / transient overload — retried with exponential backoff (implemented)
 * Network retry
-* Contradictory evidence
+* Contradictory evidence — surfaced explicitly by the Judge, never silently resolved
 * Missing information
 * Judge failure
+* Malformed / non-JSON agent output — tolerant JSON parsing via `raw_decode`, ignores trailing extra data (implemented)
 
-Every failure must produce a known outcome.
-
-Unknown states are system failures.
+Every failure must produce a known outcome. Unknown states are system failures.
 
 ---
 
@@ -324,7 +318,7 @@ Merlin follows production security principles:
 * Input validation
 * Structured logging
 * Correlation IDs
-* Secret management
+* Secret management (`.env`, never committed — see `.gitignore`)
 * Model and prompt version tracking
 
 ---
@@ -364,11 +358,9 @@ Merlin GO exists to make AI decisions accountable.
 
 # Project Status
 
-Current Phase:
+**Current Phase: Architecture Definition / MVP Development**
 
-**Architecture Definition / MVP Development**
-
-Initial MVP:
+Implemented today:
 
 ```
 Decision Agent
@@ -380,13 +372,85 @@ Validator Agent
 Judge Agent
         |
         v
-Audit Record
+Audit Record (SQLite, persist-before-respond, idempotent)
 ```
+
+Also implemented: retry-with-backoff on transient LLM failures, tolerant JSON parsing, input/output hashing on every record.
 
 Future versions will introduce:
 
-* Multiple validator agents
+* Multiple validator agents (Evidence, Logic, Risk, Adversarial, Compliance run independently — never seeing each other's output before submitting, per the Validator Independence Rule)
 * Evidence graph storage
 * Decision replay engine
 * Policy engines
 * Human escalation workflows
+
+---
+
+# Project Structure
+
+```
+merlin_v2/
+├── app/
+│   ├── agents/
+│   │   ├── client.py            # Gemini free-tier client (mock/live switch, retry logic)
+│   │   ├── decision_agent.py
+│   │   ├── validator_agent.py
+│   │   └── judge_agent.py
+│   ├── models/
+│   │   └── schemas.py           # AgentOutput, DecisionProposal, JudgeVerdict, DecisionRecord
+│   ├── store/
+│   │   └── audit_store.py       # SQLite persistence, idempotency lookup
+│   ├── api/
+│   │   └── routes.py            # FastAPI app
+│   └── orchestrator.py          # wires the 3 agents together
+├── tests/
+│   └── test_cycle.py            # proves the loop, no server needed
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
+
+---
+
+# Running It
+
+All commands run from the `merlin_v2/` root.
+
+### 1. Set up a virtual environment
+```bash
+python -m venv venv
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # Mac/Linux
+```
+
+### 2. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Get a free Gemini API key (no credit card required)
+Go to [aistudio.google.com](https://aistudio.google.com) → "Get API key" → "Create API key in new project".
+
+### 4. Create a `.env` file in the `merlin_v2/` root
+```
+GEMINI_API_KEY=your-key-here
+```
+(No spaces around the `=`. Never commit this file — it's already in `.gitignore`.)
+
+### 5. Prove the loop works
+```bash
+python -m tests.test_cycle
+```
+
+### 6. Or run it as an API
+```bash
+uvicorn app.api.routes:app --reload
+```
+```bash
+curl -X POST http://127.0.0.1:8000/decisions \
+  -H "Content-Type: application/json" \
+  -d '{"request_text": "Should this payment be approved?", "idempotency_key": "req-001"}'
+```
+
+Without a `GEMINI_API_KEY` set, everything above still runs — agents fall back to deterministic mock responses so the loop mechanics can be verified without needing a key at all.
